@@ -1,13 +1,10 @@
-import os
-import json
 import requests
 import logging
-from typing import Dict, Optional, Tuple
-from dataclasses import dataclass
+from typing import Dict, Optional
 from enum import Enum
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class SignalType(Enum):
@@ -15,173 +12,124 @@ class SignalType(Enum):
     SELL = "SELL"
     HOLD = "HOLD"
 
-@dataclass
-class TradingSignal:
-    signal_type: SignalType
-    symbol: str
-    stop_price: float
-    target_price: float
-    confidence: float
-    timestamp: str
-    reasoning: str
-
 class DeepSeekSignalGenerator:
-    def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or os.getenv('DEEPSEEK_API_KEY')
-        self.base_url = "https://api.deepseek.com/v1"  # Assuming this is the API endpoint
-        self.model = "deepseek-chat"  # Adjust based on available models
-        
-        if not self.api_key:
-            logger.warning("DeepSeek API key not provided. Set DEEPSEEK_API_KEY environment variable.")
+    def __init__(self):
+        self.base_url = "https://api.deepseek.com/v1"
+        self.model = "deepseek-chat"
     
-    def _prepare_prompt(self, market_data: Dict) -> str:
-        """Prepare the trading prompt for DeepSeek"""
-        prompt_template = """
-        Analyze the following market data and provide a trading signal:
-        
-        Symbol: {symbol}
-        Current Price: {current_price}
-        24h High: {high_24h}
-        24h Low: {low_24h}
-        24h Volume: {volume_24h}
-        RSI: {rsi}
-        MACD: {macd}
-        Moving Average (50): {ma_50}
-        Moving Average (200): {ma_200}
-        
-        Please provide your analysis in the following JSON format:
-        {{
-            "signal": "BUY/SELL/HOLD",
-            "stop_price": number,
-            "target_price": number,
-            "confidence": 0.0-1.0,
-            "reasoning": "brief explanation"
-        }}
-        
-        Be precise with price levels and provide realistic risk-reward ratios.
-        """
-        
-        return prompt_template.format(**market_data)
-    
-    def _parse_signal_response(self, response_text: str) -> Optional[TradingSignal]:
-        """Parse DeepSeek's response into a structured signal"""
+    def _fetch_ohlc_data(self, symbol: str = "XBTUSD", interval: int = 60) -> Optional[Dict]:
+        """Fetch OHLC data from Kraken public API"""
         try:
-            # Extract JSON from response (might be wrapped in text)
-            json_start = response_text.find('{')
-            json_end = response_text.rfind('}') + 1
-            json_str = response_text[json_start:json_end]
-            
-            signal_data = json.loads(json_str)
-            
-            return TradingSignal(
-                signal_type=SignalType(signal_data['signal']),
-                symbol=signal_data.get('symbol', 'UNKNOWN'),
-                stop_price=float(signal_data['stop_price']),
-                target_price=float(signal_data['target_price']),
-                confidence=float(signal_data['confidence']),
-                timestamp=signal_data.get('timestamp', ''),
-                reasoning=signal_data['reasoning']
-            )
-        except (json.JSONDecodeError, KeyError, ValueError) as e:
-            logger.error(f"Failed to parse signal response: {e}")
-            logger.error(f"Response text: {response_text}")
-            return None
-    
-    def generate_signal(self, market_data: Dict) -> Optional[TradingSignal]:
-        """
-        Generate trading signal based on market data
-        
-        Args:
-            market_data: Dictionary containing market information
-                Required keys: symbol, current_price, high_24h, low_24h, volume_24h
-                Optional keys: rsi, macd, ma_50, ma_200, etc.
-        
-        Returns:
-            TradingSignal object or None if failed
-        """
-        if not self.api_key:
-            logger.error("API key not available")
-            return None
-        
-        prompt = self._prepare_prompt(market_data)
-        
-        try:
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
+            url = f"https://api.kraken.com/0/public/OHLC"
+            params = {
+                'pair': symbol,
+                'interval': interval
             }
             
-            payload = {
-                "model": self.model,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                "temperature": 0.1,  # Low temperature for consistent outputs
-                "max_tokens": 500
-            }
-            
-            response = requests.post(
-                f"{self.base_url}/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=30
-            )
-            
+            response = requests.get(url, params=params, timeout=10)
             response.raise_for_status()
             
-            response_data = response.json()
-            content = response_data['choices'][0]['message']['content']
+            data = response.json()
+            if data['error']:
+                logger.error(f"Kraken API error: {data['error']}")
+                return None
             
-            signal = self._parse_signal_response(content)
+            # Get the latest OHLC data (last array in the result)
+            ohlc_data = data['result'][list(data['result'].keys())[0]][-1]
             
-            if signal:
-                logger.info(f"Generated signal: {signal.signal_type.value} for {signal.symbol}")
-                logger.info(f"Stop: {signal.stop_price}, Target: {signal.target_price}")
+            return {
+                'timestamp': ohlc_data[0],
+                'open': float(ohlc_data[1]),
+                'high': float(ohlc_data[2]),
+                'low': float(ohlc_data[3]),
+                'close': float(ohlc_data[4]),
+                'volume': float(ohlc_data[6])
+            }
             
-            return signal
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"API request failed: {e}")
-            return None
         except Exception as e:
-            logger.error(f"Unexpected error: {e}")
+            logger.error(f"Failed to fetch OHLC data: {e}")
             return None
+    
+    def _prepare_prompt(self, ohlc_data: Dict, symbol: str) -> str:
+        """Prepare simple prompt with only OHLC data"""
+        return f"""
+        Analyze this OHLC data for {symbol} and provide a trading signal:
+        
+        Time: {ohlc_data['timestamp']}
+        Open: {ohlc_data['open']}
+        High: {ohlc_data['high']}
+        Low: {ohlc_data['low']}
+        Close: {ohlc_data['close']}
+        Volume: {ohlc_data['volume']}
+        
+        Respond with ONLY JSON in this format:
+        {{
+            "signal": "BUY|SELL|HOLD",
+            "stop_price": number,
+            "target_price": number,
+            "reasoning": "brief explanation"
+        }}
+        """
+    
+    def generate_signal(self, symbol: str = "XBTUSD") -> Optional[Dict]:
+        """
+        Generate trading signal for given symbol
+        
+        Returns:
+            Dict with signal data or None if failed
+        """
+        # First fetch OHLC data from Kraken
+        ohlc_data = self._fetch_ohlc_data(symbol)
+        if not ohlc_data:
+            logger.error("Failed to fetch market data")
+            return None
+        
+        logger.info(f"Fetched OHLC data for {symbol}: {ohlc_data['close']}")
+        
+        # For now, return mock signal (we'll integrate DeepSeek later)
+        return self._generate_mock_signal(ohlc_data, symbol)
+    
+    def _generate_mock_signal(self, ohlc_data: Dict, symbol: str) -> Dict:
+        """Generate mock signal for testing"""
+        close = ohlc_data['close']
+        
+        # Simple mock logic based on price action
+        if close > ohlc_data['open']:  # Green candle
+            signal = "BUY"
+            stop_price = close * 0.98  # 2% stop loss
+            target_price = close * 1.04  # 4% target
+        elif close < ohlc_data['open']:  # Red candle
+            signal = "SELL"
+            stop_price = close * 1.02  # 2% stop loss
+            target_price = close * 0.96  # 4% target
+        else:
+            signal = "HOLD"
+            stop_price = 0
+            target_price = 0
+        
+        return {
+            "signal": signal,
+            "symbol": symbol,
+            "current_price": close,
+            "stop_price": stop_price,
+            "target_price": target_price,
+            "timestamp": ohlc_data['timestamp'],
+            "reasoning": "Mock signal based on OHLC data"
+        }
 
-# Example usage and test function
-def test_signal_generator():
-    """Test function to demonstrate usage"""
-    
-    # Mock market data - replace with real data
-    market_data = {
-        "symbol": "BTCUSDT",
-        "current_price": 42000.50,
-        "high_24h": 42500.75,
-        "low_24h": 41800.25,
-        "volume_24h": 1500000000,
-        "rsi": 62.5,
-        "macd": 150.25,
-        "ma_50": 41500.00,
-        "ma_200": 40000.00
-    }
-    
-    # Initialize generator
+# Simple test
+if __name__ == "__main__":
     generator = DeepSeekSignalGenerator()
     
-    # Generate signal
-    signal = generator.generate_signal(market_data)
+    print("Fetching OHLC data and generating signal...")
+    signal = generator.generate_signal("XBTUSD")
     
     if signal:
-        print(f"Signal: {signal.signal_type.value}")
-        print(f"Symbol: {signal.symbol}")
-        print(f"Stop Price: {signal.stop_price}")
-        print(f"Target Price: {signal.target_price}")
-        print(f"Confidence: {signal.confidence}")
-        print(f"Reasoning: {signal.reasoning}")
+        print(f"\nSignal: {signal['signal']}")
+        print(f"Symbol: {signal['symbol']}")
+        print(f"Price: {signal['current_price']}")
+        print(f"Stop: {signal['stop_price']}")
+        print(f"Target: {signal['target_price']}")
+        print(f"Reason: {signal['reasoning']}")
     else:
         print("Failed to generate signal")
-
-if __name__ == "__main__":
-    test_signal_generator()
