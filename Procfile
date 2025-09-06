@@ -1,1 +1,1 @@
-worker: python /examples/test_api.py
+worker: python examples/test_api.py
