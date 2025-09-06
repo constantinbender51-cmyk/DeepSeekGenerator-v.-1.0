@@ -44,7 +44,7 @@ def run_bot():
                 time.sleep(2)
             
             logger.info("♻️ Cycle completed. Waiting for next cycle...")
-            time.sleep(60)  # Wait 1 minute between full cycles
+            time.sleep(180)  # Wait 3 minutes between full cycles
             
         except KeyboardInterrupt:
             logger.info("🛑 Bot stopped by user")
